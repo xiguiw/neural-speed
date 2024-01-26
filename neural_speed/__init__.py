@@ -72,6 +72,8 @@ class Model:
             import neural_speed.phi_cpp as cpp_model
         elif model_type == "whisper":
             import neural_speed.whisper_cpp as cpp_model
+        elif model_type == "llama_yarn":
+            import neural_speed.llama_yarn_cpp as cpp_model
         else:
             raise TypeError("Unsupported model type {}!".format(model_type))
         self.module = cpp_model
@@ -81,6 +83,9 @@ class Model:
         model_type = model_maps.get(model_config.model_type, model_config.model_type)
         if model_type == "chatglm" and "chatglm2" in model_config._name_or_path:
             model_type = "chatglm2"
+        elif model_type == "llama" and model_config.rope_scaling != None:
+            if model_config.rope_scaling["type"] == "yarn":
+                model_type = "llama_yarn"
         return model_type
 
     def init(self, model_name, use_quant=True, use_gptq=False, use_awq=False, use_autoround=False,
