@@ -35,7 +35,7 @@
 #include "models/model_utils/model_config.h"
 #include "models/model_utils/model_files.h"
 #include "models/model_utils/model_types.h"
-#include "models/model_utils/model_utils.h"
+#include "models/model_utils/quant_utils.h"
 #include "models/model_utils/util.h"
 #include "models/models.h"
 
@@ -47,7 +47,7 @@ void model_load_internal(const std::string& fname, model_archs arch, model_conte
   ms->load(ctx, progress_callback, progress_callback_user_data);
 
   model_context& lctx = *ctx;
-  lctx.support_jblas_kv = true;
+  lctx.support_bestla_kv = true;
 }
 
 void Llama::init(const char* path_model, model_context* ctx, int n_gpu_layer_, bool use_mmap_, bool use_mlock_,
@@ -65,6 +65,7 @@ void Llama::init(const char* path_model, model_context* ctx, int n_gpu_layer_, b
   auto& hparams = model.hparams;
   n_ff = hparams.n_mult;
   fprintf(stderr, "%s: n_vocab    = %u\n", __func__, hparams.n_vocab);
+  fprintf(stderr, "%s: n_ctx      = %u\n", __func__, hparams.max_seq_len);
   fprintf(stderr, "%s: n_embd     = %u\n", __func__, hparams.n_embd);
   fprintf(stderr, "%s: n_mult     = %u\n", __func__, hparams.n_mult);
   fprintf(stderr, "%s: n_head     = %u\n", __func__, hparams.n_head);
@@ -112,15 +113,15 @@ void Llama::load(model_context* ctx, model_progress_callback progress_callback, 
 
   ml->ne_ctx = ne_ctx;
 
+  const int i_gpu_start = n_layer - n_gpu_layer;
+  model.layers.resize(n_layer);
+  size_t vram_total = 0;
+
   model.others[0] = ml->get_tensor("model.embed_tokens.weight", {n_embd, n_vocab}, NE_BACKEND_CPU);
   model.others[1] = ml->get_tensor("model.norm.weight", {n_embd}, NE_BACKEND_CPU);
   model.others[2] = ml->get_tensor("lm_head.weight", {n_embd, n_vocab},
                                    n_gpu_layer > static_cast<int>(n_layer) ? MODEL_BACKEND_OFFLOAD : NE_BACKEND_CPU);
 
-  const int i_gpu_start = n_layer - n_gpu_layer;
-
-  model.layers.resize(n_layer);
-  size_t vram_total = 0;
   for (uint32_t i = 0; i < n_layer; ++i) {
     const ne_backend backend = static_cast<int>(i) < i_gpu_start ? NE_BACKEND_CPU : MODEL_BACKEND_OFFLOAD;
     auto& layer = model.layers[i];
@@ -138,7 +139,6 @@ void Llama::load(model_context* ctx, model_progress_callback progress_callback, 
     layer.attn[5] = ml->get_tensor(layers_i + ".self_attn.v_proj.bias", {n_embd}, backend);
     layer.attn[6] = ml->get_tensor(layers_i + ".self_attn.o_proj.weight", {n_embd, n_embd}, backend);
     layer.attn[7] = ml->get_tensor(layers_i + ".self_attn.o_proj.bias", {n_embd}, backend);
-    
 
     // ffn norm
     layer.norm[1] = ml->get_tensor(layers_i + ".post_attention_layernorm.weight", {n_embd}, backend);
@@ -168,7 +168,7 @@ void Llama::load(model_context* ctx, model_progress_callback progress_callback, 
     model.tensors_by_name.emplace_back(lt.name, lt.ne_tensor);
   }
 
-  ml->load_all_data(progress_callback, progress_callback_user_data, use_mlock ? &lctx.model.mlock_mmap : NULL);
+  ml->load_all_data(progress_callback, progress_callback_user_data, use_mlock ? &lctx.model.mlock_mmap : nullptr);
 
   if (progress_callback) {
     progress_callback(1.0f, progress_callback_user_data);
@@ -182,8 +182,9 @@ void Llama::load(model_context* ctx, model_progress_callback progress_callback, 
 class llama_quant_layer : public quant_layer_base {
  public:
   quant_params_internal get_layer_config(std::string layername, std::vector<int64_t> ne, ne_type type) override {
-    bool quantize = layername.rfind("weight") == layername.size() - 6;  // ends with 'weight'?
-    if (layername.find("embed_tokens") != std::string::npos) {
+    bool quantize = layername.rfind("weight") == layername.size() - 6;
+    if ((layername.find("embed_tokens") != std::string::npos) ||
+        (layername == "token_embd.weight" || layername == "tok_embeddings.weight")) {
       // special layer process, can be loaded by config file
       return quant_params_internal();  // return q4_0 to cover the usage of getrow
     }

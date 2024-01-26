@@ -484,7 +484,7 @@ class model_name_to_arch {
       {"falcon", MODEL_FALCON},   {"bloom", MODEL_BLOOM},       {"chatglm2", MODEL_CHATGLM2},
       {"chatglm", MODEL_CHATGLM}, {"baichuan", MODEL_BAICHUAN}, {"mistral", MODEL_LLAMA},
       {"qwen", MODEL_QWEN},       {"phi", MODEL_PHI},           {"whisper", MODEL_WHISPER},
-      {"mixtral", MODEL_LLAMA}};
+      {"mixtral", MODEL_LLAMA},   {"llama_yarn", MODEL_LLAMA}};
 };
 
 #ifdef __cplusplus

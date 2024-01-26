@@ -1,4 +1,16 @@
-
+#  Copyright (c) 2023 Intel Corporation
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
 import io
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "" 
@@ -99,7 +111,10 @@ def main(args_in: Optional[List[str]] = None) -> None:
     fout.write(struct.pack("f", hparams.get("rms_norm_eps", 1e-6)))  # rms norm eps
     fout.write(struct.pack("f", 10000.0))  # freq_base
     fout.write(struct.pack("f", 1.0))  # rope_factor
-    
+
+    fout.write(struct.pack("i", 0))  # n_experts 
+    fout.write(struct.pack("i", 0))  # n_experts_used
+
     fout.write(struct.pack("f", hparams["rope_scaling"]["factor"]))
     # import pdb;pdb.set_trace()
     fout.write(struct.pack("i", hparams["rope_scaling"]["original_max_position_embeddings"]))
