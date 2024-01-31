@@ -56,11 +56,15 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
   const int N = inputs->n_tokens;
   const int n_past = inputs->n_past;
   const int n_total = inputs->n_total;
+
   // enforce that the first token is BOS
+#ifndef CUSTOMED_MODEL
+  // customed model does NOT have the BOS token, skip this check
   if (n_total == 0 && inputs->tokens[0] != lctx.vocab.bos_token_id) {
     fprintf(stderr, "%s: first token must be BOS\n", __func__);
     return false;
   }
+#endif
 
   const int batch_size = lctx.batch_size;
   MODEL_ASSERT(batch_size == n_input);
@@ -142,12 +146,31 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
     bestla_reordered_attn_fp32_batch_kv_info(&kv_shape, &kv_cache_info);
   }
 
+#ifdef DEBUG_INPUT
+  printf("CUSTOMED_MODEL: customer model defined : \n");
+  for (int i = 0; i < N; ++i) {
+    printf("tokens: %d\t", inputs->tokens[i]);
+  }
+  printf("\n");
+#endif
+
   struct ne_tensor* embd = ne_new_tensor_1d(ctx0, NE_TYPE_I32, N, NE_SIZE_CALC);
   ne_set_name(embd, "embd");
   for (int i = 0; i < batch_size; ++i) {
     memcpy(static_cast<model_token*>(embd->data) + i * N, (inputs + i)->tokens, N * ne_element_size(embd));
   }
 
+#ifdef DEBUG_INPUT
+  static bool initialzied_token = false;
+  if (!initialzied_token) {
+    int *p = (int *)embd->data;
+    p[0] = 31373;
+    p[1] = 995;
+    printf("\n ***embd data tokens: %d %d\n", p[0], p[1]);
+    initialzied_token = true;
+  }
+#endif
+ 
 #ifdef NS_TP_MODEL
   if (enable_tp) {
     // need to broadcast the ids
@@ -164,6 +187,8 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
     lctx.use_buf(ctx0, 0);
 
     // norm
+    //int mode = (hparams.use_yarn == true) ? 0x8: 0x0;
+    int mode = 0x8;
     {
       cur = ne_rms_norm(ctx0, inpL, hparams.rms_norm_eps);
 
@@ -171,6 +196,10 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
       cur = ne_mul(ctx0, cur, model.layers[il].norm[0]);
     }
     ne_tensor *Qcur, *Kcur, *Vcur;
+
+#ifndef CUSTOMED_MODEL
+    //llama
+    //Llama model
     if (bestla_fusion_QKV_f32f32_support(model.layers[il].attn[0]->data, model.layers[il].attn[1]->data,
                                          model.layers[il].attn[2]->data, N, model.layers[il].attn[0]->ne[1],
                                          model.layers[il].attn[0]->ne[0]) &&
@@ -195,6 +224,54 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
     ne_set_name(Kcur, "Kcur");
     Vcur = ne_transpose(ctx0, ne_reshape_2d(ctx0, Vcur, head_size * n_head_kv, N));
     ne_set_name(Vcur, "Vcur");
+#else
+    //llama_yarn
+      //How the bias processed here? fused QKV is not supported for customed model.
+    if (bestla_fusion_QKV_f32f32_support(model.layers[il].attn[0]->data, model.layers[il].attn[2]->data,
+                                         model.layers[il].attn[4]->data, N, model.layers[il].attn[0]->ne[1],
+                                         model.layers[il].attn[0]->ne[0]) &&
+        n_head == n_head_kv) {  // fused execution of QKV
+      struct ne_tensor* QKVcur =
+          ne_mul_qkv(ctx0, model.layers[il].attn[0], model.layers[il].attn[2], model.layers[il].attn[4], cur);
+      const size_t qkv_size = head_size * n_head * N;
+      const size_t qkv_bytes = qkv_size * ne_element_size(QKVcur);
+      Qcur = ne_reshape_3d(ctx0, ne_view_1d(ctx0, QKVcur, qkv_size, 0 * qkv_bytes), head_size, n_head, N);
+      Kcur = ne_reshape_3d(ctx0, ne_view_1d(ctx0, QKVcur, qkv_size, 1 * qkv_bytes), head_size, n_head_kv, N);
+      Vcur = ne_view_1d(ctx0, QKVcur, qkv_size, 2 * qkv_bytes);
+    } else {
+      struct ne_tensor* tmp_mul = ne_mul_mat(ctx0, model.layers[il].attn[0], cur);
+      ne_set_name(tmp_mul, "Query");
+      tmp_mul = ne_add_inplace(ctx0, tmp_mul, model.layers[il].attn[1]);
+      Qcur = ne_reshape_3d(ctx0, tmp_mul, head_size, n_head, N);
+
+      struct ne_tensor* tmp_k = ne_mul_mat(ctx0, model.layers[il].attn[2], cur);
+      ne_set_name(tmp_k, "Key");
+      tmp_k = ne_add_inplace(ctx0, tmp_k, model.layers[il].attn[3]);
+      Kcur = ne_reshape_3d(ctx0, tmp_k, head_size, n_head_kv, N);
+
+      Vcur = ne_mul_mat(ctx0, model.layers[il].attn[4], cur);
+      ne_set_name(Vcur, "Value");
+      Vcur = ne_add_inplace(ctx0, Vcur, model.layers[il].attn[5]);
+    }
+
+    float ext_factor = 1.0, attn_factor = 1.0, beta_fast = 32.0, beta_slow = 1.0;
+
+    ne_set_name(Qcur, "Qcur");
+    Qcur =
+        ne_rope_custom_inplace(ctx0, Qcur, std::max(n_cached - N, n_past), n_rot, mode, 0, hparams.freq_base, hparams.rope_scaling_factor,
+                        hparams.original_max_position_embeddings, ext_factor, attn_factor, beta_fast, beta_slow);
+    ne_set_name(Qcur, "Qcurdst");
+
+    ne_set_name(Kcur, "Kcur");
+    Kcur = ne_rope_custom_inplace(  // n_ctx exceeds but it will be shift-roped back with cached K
+        ctx0, Kcur, (is_ring_full ? n_ctx : n_past), n_rot, mode, 0, hparams.freq_base, hparams.rope_scaling_factor,
+                     hparams.original_max_position_embeddings, ext_factor, attn_factor, beta_fast, beta_slow);
+    ne_set_name(Kcur, "Kcurdst");
+
+    ne_set_name(Vcur, "Vcur");
+    Vcur = ne_transpose(ctx0, ne_reshape_2d(ctx0, Vcur, head_size * n_head_kv, N));
+#endif
+
     // self-attention
     const float attn_scale = 1.0f / sqrtf(static_cast<float>(head_size));
     if (!run_mha_reordered) {
@@ -224,8 +301,16 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
         if (N == 1) {
           cossin_cache = kv_self.cossin;
         }
+#ifndef CUSTOMED_MODEL
+        //how could it be 
         K = ne_rope_shift_inplace(ctx0, K, -N, n_rot, 0, 0, n_keep, cossin_cache, hparams.freq_base,
                                   hparams.freq_scale);
+#else
+        //custmodel ...
+        K = ne_rope_custom_shift_inplace(ctx0, K, -N, n_rot, mode, 0, n_keep, cossin_cache, hparams.freq_base,
+                                  hparams.rope_scaling_factor,
+                                  hparams.original_max_position_embeddings, ext_factor, attn_factor, beta_fast, beta_slow);
+#endif
       }
       K = ne_permute(ctx0, K, 0, 2, 1, 3);
       ne_set_name(K, "K");
@@ -269,8 +354,13 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
       cur = ne_cpy(ctx0, KQV_merged, ne_new_tensor_2d(ctx0, NE_TYPE_F32, head_size * n_head, N, NE_SIZE_CALC));
       ne_set_name(cur, "KQV_merged_contiguous");
 
+#ifndef CUSTOMED_MODEL
       // projection (no bias)
       cur = ne_mul_mat(ctx0, model.layers[il].attn[3], cur);
+#else
+      cur = ne_mul_mat(ctx0, model.layers[il].attn[6], cur);
+      cur = ne_add_inplace(ctx0, cur, model.layers[il].attn[7]);
+#endif
     } else {
       const auto k_size = kv_cache_info.k_bytes;
       const auto v_size = kv_cache_info.v_bytes;
@@ -305,8 +395,14 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
         // Currently we only cache cossin for N == 1 in model-wide; It may be worthwhile to cache cossin for other N in
         // a single eval execution
         if (N == 1) cossin_cache = kv_self.cossin;
+#ifndef CUSTOMED_MODEL
         K = ne_rope_shift_inplace(ctx0, K, -N, n_rot, 0, 0, n_keep, cossin_cache, hparams.freq_base,
                                   hparams.freq_scale);
+#else
+        K = ne_rope_custom_shift_inplace(ctx0, K, -N, n_rot, mode, 0, n_keep, cossin_cache, hparams.freq_base,
+                                  hparams.rope_scaling_factor,
+                                  hparams.original_max_position_embeddings, ext_factor, attn_factor, beta_fast, beta_slow);
+#endif
       }
       ne_set_name(K, "K");
 
@@ -326,7 +422,12 @@ static bool llama_model_eval_internal(model_context* ctx, const model_input* inp
       ne_set_name(KQV_merged_contiguous, "KQV_merged_contiguous");
 
       // projection (no bias)
+#ifndef CUSTOMED_MODE
       cur = ne_mul_mat(ctx0, model.layers[il].attn[3], KQV_merged_contiguous);
+#else
+      cur = ne_mul_mat(ctx0, model.layers[il].attn[6], KQV_merged_contiguous);
+      cur = ne_add_inplace(ctx0, cur, model.layers[il].attn[7]);
+#endif
     }
 #ifdef NS_TP_MODEL
     if (enable_tp) {
