@@ -21,6 +21,14 @@ function(add_model target)
   target_link_libraries(${target} PUBLIC ne_layers bestla)
 endfunction()
 
+function(add_customed_model target)
+  add_library_w_warning(${target} ${ARGN})  # no (gpt) model utils needed
+  target_compile_definitions(${target} PRIVATE -DCUSTOMED_MODEL)
+  target_compile_features(${target} PUBLIC cxx_std_11) # don't bump
+  set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(${target} PUBLIC ne_layers bestla)
+endfunction()
+
 add_model(llama llama/llama.cpp llama/llama_utils.cpp ${MODEL_UTILS_SOURCE})
 add_model(gptj gptj/gptj.cpp gptj/gptj_utils.cpp ${MODEL_UTILS_SOURCE})
 add_model(mpt mpt/mpt.cpp mpt/mpt_utils.cpp ${MODEL_UTILS_SOURCE})
@@ -35,3 +43,5 @@ add_model(whisper whisper/whisper.cpp whisper/whisper_utils.cpp ${MODEL_UTILS_SO
 add_model(chatglm chatglm/chatglm.cpp chatglm/chatglm_utils.cpp ${MODEL_UTILS_SOURCE})
 add_model(chatglm2 chatglm/chatglm2.cpp chatglm/chatglm2_utils.cpp ${MODEL_UTILS_SOURCE})
 add_model(phi phi/phi.cpp phi/phi_utils.cpp ${MODEL_UTILS_SOURCE})
+
+add_customed_model(llama_yarn llama/llama.cpp llama/llama_yarn_utils.cpp ${MODEL_UTILS_SOURCE})

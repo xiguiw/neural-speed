@@ -14,6 +14,7 @@
 
 import io
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "" 
 import sys
 import struct
 import json
@@ -24,8 +25,10 @@ from pathlib import Path
 import argparse
 from typing import (IO, TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, TypeVar,
                     Union)
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-
+#from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import GenerationConfig
+#model = AutoModelForCausalLM.from_pretrained("./", torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
 
 # ref: https://github.com/openai/gpt-2/blob/master/src/encoder.py
 def bytes_to_unicode():
@@ -68,38 +71,37 @@ def main(args_in: Optional[List[str]] = None) -> None:
         ftype = 1
 
     tokenizer = AutoTokenizer.from_pretrained(dir_model, trust_remote_code=True)
-    config = AutoConfig.from_pretrained(dir_model, trust_remote_code=True)
-    with open(os.path.join(dir_model, "config.json"), "r", encoding="utf-8") as f:
-        hparams = json.load(f)
-    if hparams["architectures"][0] != "FalconForCausalLM":
-        print("Model architecture not supported: " + hparams["architectures"][0])
-        sys.exit(1)
+ #   import pdb;pdb.set_trace()
     print("Loading model: ", dir_model)
-    model = AutoModelForCausalLM.from_pretrained(dir_model,
-                                                 config=config,
-                                                 torch_dtype=torch.float16 if ftype == 1 else torch.float32,
-                                                 low_cpu_mem_usage=True,
-                                                 trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained("./", torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
+    #model = AutoModelForCausalLM.from_pretrained(dir_model, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True)
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad = False
+    hparams = model.config.to_dict()
     print("Model loaded: ", dir_model)
 
-    n_head_kv = hparams.get("num_kv_heads", 1)
-    n_head = hparams["num_attention_heads"]
-    head_dim = hparams["hidden_size"] // n_head
-
     fout = open(fname_out, "wb")
-    fout.write(struct.pack("i", 0x67676d6c))  # magic: falcon in hex
 
+    # 0x67676d6c is unversioned ne
+    # 0x67676d66 is versioned ggmf (requires token scores)
+    ne_file_magic = 0x67676d66
+    #ne_file_version = 0x00000001 # v1
+
+    fout.write(struct.pack("i", ne_file_magic))  # magic: ne in hex
+    fout.write(struct.pack("i", 1))
+    #import pdb;pdb.set_trace()
     fout.write(struct.pack("i", hparams["vocab_size"]))
     fout.write(struct.pack("i", hparams["hidden_size"]))
-    fout.write(struct.pack("i", 0))
-    fout.write(struct.pack("i", n_head))
-    fout.write(struct.pack("i", n_head_kv))  # multi-query attention
-    fout.write(struct.pack("i", hparams["num_hidden_layers"]))
-    fout.write(struct.pack("i", 0))
+    fout.write(struct.pack("i", hparams["intermediate_size"]))  # dummy data
+    fout.write(struct.pack("i", hparams["num_attention_heads"]))
+    fout.write(struct.pack("i", hparams["num_key_value_heads"]))  # multi-query attention
+    fout.write(struct.pack("i", hparams["num_key_value_heads"]))
+    fout.write(struct.pack("i", hparams["num_key_value_heads"]))
     fout.write(struct.pack("i", ftype))
-    fout.write(struct.pack("i", 0))
-    fout.write(struct.pack("f", 0))
-    fout.write(struct.pack("f", 0))
+    fout.write(struct.pack("i", hparams["max_sequence_length"]))
+    fout.write(struct.pack("f", 0.0))
+    fout.write(struct.pack("f", 0.0))
     fout.write(struct.pack("i", 0))
     fout.write(struct.pack("i", 0))  # word_embed_proj_dim (for opt)
     fout.write(struct.pack("i", 0))  # do_layer_norm_before (for opt)
@@ -111,43 +113,42 @@ def main(args_in: Optional[List[str]] = None) -> None:
     fout.write(struct.pack("f", 10000.0))  # freq_base
     fout.write(struct.pack("f", 1.0))  # rope_factor
     
-    fout.write(struct.pack("f", 0.0)) # config.json "rope_scaling.factor", not enabled
-    fout.write(struct.pack("i", 0))   # rope_scaling.original_max_position_embeddings
-    fout.write(struct.pack("i", 0))   # params["rope_scaling"]["type"] =="yarn" else 0))
+    fout.write(struct.pack("f", hparams["rope_scaling"]["factor"]))
+    # import pdb;pdb.set_trace()
+    fout.write(struct.pack("i", hparams["rope_scaling"]["original_max_position_embeddings"]))
+    fout.write(struct.pack("i", 1 if hparams["rope_scaling"]["type"]=="yarn" else 0))
 
-    fout.write(struct.pack("i", tokenizer.bos_token_id if tokenizer.bos_token_id is not None else 1))
-    fout.write(struct.pack("i", tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 2))
-    fout.write(struct.pack("i", tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -1))
+    fout.write(struct.pack("i", hparams["bos_token_id"]))
+    fout.write(struct.pack("i", hparams["eos_token_id"]))
+    fout.write(struct.pack("i", hparams["pad_token_id"]))
     fout.write(struct.pack("i", tokenizer.sep_token_id if tokenizer.sep_token_id is not None else -1))
-
-    reverse_vocab = {id: encoded_tok for encoded_tok, id in tokenizer.vocab.items()}
-    byte_encoder = bytes_to_unicode()
-    byte_decoder = {v: k for k, v in byte_encoder.items()}
-
     for i in range(hparams["vocab_size"]):
-        text = bytearray([byte_decoder[c] for c in reverse_vocab[i]])
-        fout.write(struct.pack("i", len(text)))
-        fout.write(text)
+        if i < tokenizer.vocab_size:
+            text = tokenizer.decode([i]).encode('utf-8')
+            fout.write(struct.pack("i", len(text)))
+            fout.write(text)
+            fout.write(struct.pack("f", 0.0 - i))
+        else:
+            text = tokenizer.decode([tokenizer.vocab_size - 1]).encode('utf-8')
+            fout.write(struct.pack("i", len(text)))
+            fout.write(text)
+            fout.write(struct.pack("f", -10000))
 
     list_vars = model.state_dict()
+
+    print(hparams)
+
     for name in list_vars.keys():
+        # No gradients for these
+        list_vars[name].requires_grad = False
         src = name
-        # The original query_key_value tensor contains n_head_kv "kv groups",
-        # each consisting of n_head/n_head_kv query weights followed by one key
-        # and one value weight (shared by all query heads in the kv group).
-        # This layout makes it a big pain to work with in GGML.
-        # So we rearrange them here,, so that we have n_head query weights
-        # followed by n_head_kv key weights followed by n_head_kv value weights,
-        # in contiguous fashion.
-
-        if "query_key_value" in src and n_head_kv != 1:
-            qkv = list_vars[src].view(n_head_kv, n_head // n_head_kv + 2, head_dim, head_dim * n_head)
-
-            q = qkv[:, :-2].reshape(n_head * head_dim, head_dim * n_head)
-            k = qkv[:, [-2]].reshape(n_head_kv * head_dim, head_dim * n_head)
-            v = qkv[:, [-1]].reshape(n_head_kv * head_dim, head_dim * n_head)
-
-            list_vars[src] = torch.cat((q, k, v)).reshape_as(list_vars[src])
+        nn = name
+        if 'self_attn.q_proj.weight' in src or 'self_attn.k_proj.weight' in src or 'self_attn.q_proj.bias' in src or 'self_attn.k_proj.bias' in src:
+            shape = list_vars[src].shape
+            n_head = hparams["num_attention_heads"]
+            list_vars[src]=list_vars[src].reshape(n_head,2,shape[0]//n_head//2,*shape[1:]).transpose(1,2).reshape(shape)
+        print(src, ' -> ', name)
+        list_vars[src]=list_vars[src].float()
         data = list_vars[src].squeeze().numpy()
         data = data.astype(np.float32)
 
@@ -157,15 +158,19 @@ def main(args_in: Optional[List[str]] = None) -> None:
         # default type is fp32
         ftype_cur = 0
         if ftype == 1 and n_dims > 1:
-            print("  Converting to float16")
+            print("  Converting to float16", data.shape, data[:3, :3].tolist())
             data = data.astype(np.float16)
             ftype_cur = 1
+        else:
+            print("  Converting to float32", data.shape, data[:3, :3].tolist() if n_dims > 1 else data[:3].tolist())
+            data = data.astype(np.float32)
 
         # header
         str = name.encode('utf-8')
         fout.write(struct.pack("iii", n_dims, len(str), ftype_cur))
         for i in range(n_dims):
             fout.write(struct.pack("i", data.shape[n_dims - 1 - i]))
+        print(str)
         fout.write(str)
 
         # data

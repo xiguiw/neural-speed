@@ -139,6 +139,9 @@ struct model_hparams {
 
   // ChatGLM-1
   int32_t inner_hidden_size = 0;
+  float rope_scaling_factor = 0.0f;
+  int32_t original_max_position_embeddings = 0;
+  int32_t use_yarn = 0;
 
   bool operator!=(const model_hparams& other) const {
     return static_cast<bool>(memcmp(this, &other, sizeof(model_hparams)));
@@ -466,7 +469,8 @@ class model_name_to_arch {
       {"dolly", MODEL_GPTNEOX},   {"polyglot", MODEL_GPTNEOX},  {"starcoder", MODEL_STARCODER},
       {"falcon", MODEL_FALCON},   {"bloom", MODEL_BLOOM},       {"chatglm2", MODEL_CHATGLM2},
       {"chatglm", MODEL_CHATGLM}, {"baichuan", MODEL_BAICHUAN}, {"mistral", MODEL_LLAMA},
-      {"qwen", MODEL_QWEN},       {"phi", MODEL_PHI},           {"whisper", MODEL_WHISPER}};
+      {"qwen", MODEL_QWEN},       {"phi", MODEL_PHI},           {"whisper", MODEL_WHISPER},
+      {"llama_yarn", MODEL_LLAMA} };
 };
 
 #ifdef __cplusplus
